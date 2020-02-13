@@ -33,44 +33,107 @@
 #define P1_INIT_DECRYPT_SHOW_SHARED_KEY     3
 #define P1_AES_ENCRYPT_DECRYPT              4
 
+#define STATE_INVAILD       0
+#define STATE_BUTTON        1
+#define STATE_AUTHORIZED    2
+
 /*
 
     This command allows the client to encrypt and decrypt messages that are assigned to some foreign public key and nonce
     First you need to call the right INIT function, you have 3 choices. After that you call P1_AES_ENCRYPT_DECRYPT as many times as you need
 
+    //todo descibe the msg size and in other places the endian'nes of the code
+
     API:
 
         P1: P1_INIT_ENCRYPT:
-        dataBuffer: derivation path (uint32) * some length | second party public key
+        dataBuffer: msg size (uint16) | derivation path (uint32) * some length | second party public key
         returns:    1 byte status | nonce (on success) | IV
 
         P1: P1_INIT_DECRYPT_HIDE_SHARED_KEY:
-        dataBuffer: derivaiton path (uint32) * some length | second party public key | nonce | IV
+        dataBuffer: msg size (uint16) | derivaiton path (uint32) * some length | second party public key | nonce | IV
         returns:    1 byte status
 
         P1: P1_INIT_DECRYPT_SHOW_SHARED_KEY:
-        dataBuffer: derivaiton path (uint32) * some length | second party public key | nonce | IV
+        dataBuffer: msg size (uint16) | derivaiton path (uint32) * some length | second party public key | nonce | IV
         returns:    1 byte status | sharedkey 32 bytes
 
         P1_AES_ENCRYPT_DECRYPT:
         dataBuffer: buffer (224 max size) should be in modulu of 16 
         returns:    encrypted / decrypted buffer (same size as input)
+
+
+    msg size should be of modulu 16 also and bigger then 0
 */
 
+
 void cleanEncryptionState() {
+    state.encryption.state = STATE_INVAILD;
     state.encryption.mode = 0;
+    state.encryption.messageLengthBytes = 0;
+
+    os_memset(state.encryption.cbc, 0, sizeof(state.encryption.cbc));
+    os_memset(state.encryption.ctx, 0, sizeof(state.encryption.ctx));
+    os_memset(state.encryption.nonce, 0, sizeof(state.encryption.nonce));
+    os_memset(state.encryption.sharedKey, 0, sizeof(state.encryption.sharedKey));
+}
+
+static const bagl_element_t ui_screen[] = {
+        UI_BACKGROUND(),
+        {{BAGL_ICON,0x00,3,12,7,7,0,0,0,0xFFFFFF,0,0,BAGL_GLYPH_ICON_CROSS},NULL,0,0,0,NULL,NULL,NULL},
+        {{BAGL_ICON,0x00,117,13,8,6,0,0,0,0xFFFFFF,0,0,BAGL_GLYPH_ICON_CHECK},NULL,0,0,0,NULL,NULL,NULL},        
+        UI_TEXT(0x00, 0, 12, 128, state.encryption.dialogTitle),
+        {{BAGL_LABELINE,0x01,15,26,98,12,10,0,0,0xFFFFFF,0,BAGL_FONT_OPEN_SANS_EXTRABOLD_11px|BAGL_FONT_ALIGNMENT_CENTER,26},(char*)state.encryption.dialogContent,0,0,0,NULL,NULL,NULL}
+};
+
+static unsigned int ui_screen_button(const unsigned int button_mask, const unsigned int button_mask_counter) {
+
+    uint tx = 0;
+
+    switch (button_mask) {
+        case BUTTON_EVT_RELEASED | BUTTON_LEFT:
+
+            G_io_apdu_buffer[tx++] = R_SUCCESS;
+
+            if (P1_INIT_ENCRYPT == state.encryption.mode) {
+                os_memcpy(G_io_apdu_buffer + tx, state.encryption.nonce, sizeof(state.encryption.nonce));
+                tx += 32;
+                os_memcpy(G_io_apdu_buffer + tx, state.encryption.cbc, sizeof(state.encryption.cbc)); //The IV
+                tx += sizeof(state.encryption.cbc);
+            } else if (P1_INIT_DECRYPT_SHOW_SHARED_KEY == state.encryption.mode) {
+                os_memcpy(G_io_apdu_buffer + tx, state.encryption.sharedKey, sizeof(state.encryption.sharedKey));
+                tx += 32;
+            }
+
+            os_memset(state.encryption.sharedKey, 0, sizeof(state.encryption.sharedKey)); //cleaning as soon as possible, the actuable key we are using to do the work is in ctx
+            state.encryption.mode = STATE_AUTHORIZED;
+
+        case BUTTON_EVT_RELEASED | BUTTON_RIGHT:
+
+            cleanEncryptionState();
+            G_io_apdu_buffer[tx++] = R_REJECT;
+
+        default:
+
+            return 0;
+    }
+
+    G_io_apdu_buffer[tx++] = 0x90;
+    G_io_apdu_buffer[tx++] = 0x00;
+    io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, tx);
+    ui_idle();
+
+    return 0;
 }
 
 void encryptDecryptMessageHandlerHelper(const uint8_t p1, const uint8_t p2, const uint8_t * const dataBuffer, const uint8_t dataLength,
                 volatile unsigned int * const flags, volatile unsigned int * const tx, const bool isLastCommandDifferent) {
 
-    if (isLastCommandDifferent)
-        cleanEncryptionState();
-
     if ((P1_INIT_ENCRYPT == p1) || (P1_INIT_DECRYPT_HIDE_SHARED_KEY == p1) || (P1_INIT_DECRYPT_SHOW_SHARED_KEY == p1)) {
 
-        if (0 != dataLength % sizeof(uint32_t)) {
-            cleanEncryptionState();
+        cleanEncryptionState();
+
+        if (0 != (dataLength - sizeof(state.encryption.messageLengthBytes)) % sizeof(uint32_t)) {
             G_io_apdu_buffer[(*tx)++] = R_WRONG_SIZE_ERR;
             return;
         }
@@ -78,83 +141,103 @@ void encryptDecryptMessageHandlerHelper(const uint8_t p1, const uint8_t p2, cons
         uint8_t derivationLength = 0;
 
         if (P1_INIT_ENCRYPT == p1)
-            derivationLength = (dataLength - 32) / sizeof(uint32_t);
+            derivationLength = (dataLength - 32 - sizeof(state.encryption.messageLengthBytes)) / sizeof(uint32_t);
         else
-            derivationLength = (dataLength - 32 * 2 - 16) / sizeof(uint32_t);
+            derivationLength = (dataLength - 32 * 2 - 16 - sizeof(state.encryption.messageLengthBytes)) / sizeof(uint32_t);
 
+        //todo swap these out for consts
         if (2 > derivationLength) {
-            cleanEncryptionState();
             G_io_apdu_buffer[(*tx)++] = R_DERIVATION_PATH_TOO_SHORT;
             return;
         }
 
         if (32 < derivationLength) {
-            cleanEncryptionState();
             G_io_apdu_buffer[(*tx)++] = R_DERIVATION_PATH_TOO_LONG;
             return;
         }
 
-        uint32_t derivationPath[32]; //todo check if i can just point to the derivation path
-        uint8_t nonce[32];
-        os_memcpy(derivationPath, dataBuffer, derivationLength * sizeof(uint32_t));
+        os_memcpy(&state.encryption.messageLengthBytes, dataBuffer, sizeof(state.encryption.messageLengthBytes));
 
-        uint8_t * noncePtr = dataBuffer + derivationLength * sizeof(uint32_t) + 32;
-
-        if (P1_INIT_ENCRYPT == p1) {
-            cx_rng(nonce, sizeof(nonce));
-            noncePtr = nonce; //if we are decrypting then we are using from the command
+        if ((0 == state.encryption.messageLengthBytes) || (0 != state.encryption.messageLengthBytes % 16)) {
+            cleanEncryptionState();
+            G_io_apdu_buffer[(*tx)++] = R_BAD_MSG_LENGTH;
+            return;
         }
 
-        uint8_t exceptionOut = 0;
-        uint8_t encryptionKey[32];
+        uint32_t derivationPath[32]; //todo check if i can just point to the derivation path
+        os_memcpy(derivationPath, dataBuffer + sizeof(state.encryption.messageLengthBytes), derivationLength * sizeof(uint32_t));
 
-        uint8_t ret = getSharedEncryptionKey(derivationPath, derivationLength, dataBuffer + derivationLength * sizeof(uint32_t), noncePtr, &exceptionOut, encryptionKey);
+        uint8_t exceptionOut = 0;
+        uint64_t localAddressId;
+
+        uint8_t * noncePtr = dataBuffer + derivationLength * sizeof(uint32_t) + 32 + sizeof(state.encryption.messageLengthBytes);
+
+        if (P1_INIT_ENCRYPT == p1) {
+            cx_rng(state.encryption.nonce, sizeof(state.encryption.nonce));
+            noncePtr = state.encryption.nonce; //if we are decrypting then we are using from the command
+        }
+
+        uint8_t ret = getSharedEncryptionKey(derivationPath, derivationLength, dataBuffer + derivationLength * sizeof(uint32_t) + sizeof(state.encryption.messageLengthBytes), 
+            noncePtr, &exceptionOut, state.encryption.sharedKey, &localAddressId);
+
+
+        snprintf(state.encryption.dialogContent, sizeof(state.encryption.dialogContent), "%d bytes between your %s-", state.encryption.messageLengthBytes, APP_PREFIX);
+        uint8_t tempLength = strlen(state.encryption.dialogContent);
+        reedSolomonEncode(localAddressId, state.encryption.dialogContent + tempLength);
+        tempLength += 20; //todo move to const
+        snprintf(state.encryption.dialogContent + tempLength, sizeof(state.encryption.dialogContent) - tempLength, " and %s-", APP_PREFIX);
+        tempLength += 6 + sizeof(APP_PREFIX);
+        reedSolomonEncode(publicKeyToId(dataBuffer + derivationLength * sizeof(uint32_t) + sizeof(state.encryption.messageLengthBytes)), state.encryption.dialogContent + tempLength);
+        tempLength += 20;
+
+        if (P1_INIT_DECRYPT_SHOW_SHARED_KEY == p1)
+            snprintf(state.encryption.dialogContent + tempLength, sizeof(state.encryption.dialogContent) - tempLength, " and share encryption key");
 
         if (R_KEY_DERIVATION_EX == ret) {
             cleanEncryptionState();
-            G_io_apdu_buffer[0] = ret;  
-            G_io_apdu_buffer[1] = exceptionOut >> 8;
-            G_io_apdu_buffer[2] = exceptionOut & 0xFF;
-            *tx = 3;
+            G_io_apdu_buffer[(*tx)++] = ret;
+            G_io_apdu_buffer[(*tx)++] = exceptionOut >> 8;
+            G_io_apdu_buffer[(*tx)++] = exceptionOut & 0xFF;
             return;
         } else if (R_SUCCESS != ret) {
             cleanEncryptionState();
-            G_io_apdu_buffer[0] = ret;
-            *tx = 1;
+            G_io_apdu_buffer[(*tx)++] = ret;
             return;
         }
 
         if (P1_INIT_ENCRYPT == p1) {
-            if (!aes_encrypt_init_fixed(encryptionKey, 32, state.encryption.ctx)) {
+            snprintf(state.encryption.dialogTitle, sizeof(state.encryption.dialogTitle), "Msg Encryption");
+
+            if (!aes_encrypt_init_fixed(state.encryption.sharedKey, sizeof(state.encryption.sharedKey), state.encryption.ctx)) {
                 cleanEncryptionState();
-                G_io_apdu_buffer[0] = R_AES_ERROR;
-                *tx = 1;
+                G_io_apdu_buffer[(*tx)++] = R_AES_ERROR;
                 return;
             }
+
+            os_memset(state.encryption.sharedKey, 0, sizeof(state.encryption.sharedKey)); //cleaning as soon as possible, the actuable key we are using to do the work is in ctx
+            cx_rng(state.encryption.cbc, sizeof(state.encryption.cbc));
+
         } else {
-            if (!aes_decrypt_init_fixed(encryptionKey, 32, state.encryption.ctx)) {
+            snprintf(state.encryption.dialogTitle, sizeof(state.encryption.dialogTitle), "Msg Decryption");
+
+            if (!aes_decrypt_init_fixed(state.encryption.sharedKey, sizeof(state.encryption.sharedKey), state.encryption.ctx)) {
                 cleanEncryptionState();
-                G_io_apdu_buffer[0] = R_AES_ERROR;
-                *tx = 1;
+                G_io_apdu_buffer[(*tx)++] = R_AES_ERROR;
                 return;
+            }
+
+            if (P1_INIT_DECRYPT_HIDE_SHARED_KEY == p1) {
+                os_memset(state.encryption.sharedKey, 0, sizeof(state.encryption.sharedKey)); //cleaning as soon as possible, the actuable key we are using to do the work is in ctx
             }
 
             os_memcpy(state.encryption.cbc, dataBuffer + dataLength - sizeof(state.encryption.cbc), sizeof(state.encryption.cbc)); //Copying the IV into the CBC
         }
-        
-        state.encryption.mode = p1;
-        G_io_apdu_buffer[(*tx)++] = R_SUCCESS;
 
-        if (P1_INIT_ENCRYPT == p1) {
-            os_memcpy(G_io_apdu_buffer + *tx, nonce, sizeof(nonce));
-            *tx+= 32;
-            cx_rng(state.encryption.cbc, sizeof(state.encryption.cbc)); //The IV is stored in the CVC
-            os_memcpy(G_io_apdu_buffer + *tx, state.encryption.cbc, sizeof(state.encryption.cbc));
-            *tx+= sizeof(state.encryption.cbc);
-        } else if (P1_INIT_DECRYPT_SHOW_SHARED_KEY == p1) {
-            os_memcpy(G_io_apdu_buffer + *tx, encryptionKey, sizeof(encryptionKey));
-            *tx+= 32;
-        }
+        state.encryption.state = STATE_BUTTON;
+        state.encryption.mode = p1;
+
+        UX_DISPLAY(ui_screen, (bagl_element_callback_t)makeTextGoAround_preprocessor)
+        *flags |= IO_ASYNCH_REPLY;
 
     } else if (P1_AES_ENCRYPT_DECRYPT == p1) {
 
@@ -164,11 +247,9 @@ void encryptDecryptMessageHandlerHelper(const uint8_t p1, const uint8_t p2, cons
             return;
         }
 
-        if ((P1_INIT_ENCRYPT != state.encryption.mode) && (P1_INIT_DECRYPT_HIDE_SHARED_KEY != state.encryption.mode) && 
-            (P1_INIT_DECRYPT_SHOW_SHARED_KEY != state.encryption.mode))
-        {
+        if (STATE_AUTHORIZED != state.encryption.state) {
             cleanEncryptionState();
-            G_io_apdu_buffer[(*tx)++] = R_NO_SETUP;
+            G_io_apdu_buffer[(*tx)++] = R_NO_SETUP_OR_AUTHORIZATION;
             return;
         }
 
@@ -177,6 +258,14 @@ void encryptDecryptMessageHandlerHelper(const uint8_t p1, const uint8_t p2, cons
             G_io_apdu_buffer[(*tx)++] = R_WRONG_SIZE_MODULO_ERR;
             return;
         }
+
+        if (state.encryption.messageLengthBytes < dataLength) {
+            cleanEncryptionState();
+            G_io_apdu_buffer[(*tx)++] = R_BAD_MSG_LENGTH;
+            return;
+        }
+
+        state.encryption.messageLengthBytes -= dataLength;
 
         uint8_t * pos = dataBuffer;
         uint8_t tmp[AES_BLOCK_SIZE];
@@ -219,6 +308,8 @@ void encryptDecryptMessageHandler(const uint8_t p1, const uint8_t p2, const uint
 
     encryptDecryptMessageHandlerHelper(p1, p2, dataBuffer, dataLength, flags, tx, isLastCommandDifferent);
     
-    G_io_apdu_buffer[(*tx)++] = 0x90;
-    G_io_apdu_buffer[(*tx)++] = 0x00;
+    if (0 == ((*flags) & IO_ASYNCH_REPLY)) {
+        G_io_apdu_buffer[(*tx)++] = 0x90;
+        G_io_apdu_buffer[(*tx)++] = 0x00;
+    }
 }

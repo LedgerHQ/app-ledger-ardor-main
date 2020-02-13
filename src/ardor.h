@@ -24,6 +24,7 @@ bool check_canary();
 #define FUNCTION_STACK_SIZE 30
 #define IV_SIZE 16
 
+//todo add comments to all the structs here
 typedef struct {
 
 	bool txnPassedAutherization;
@@ -71,8 +72,22 @@ typedef struct {
 
 typedef struct {
     uint8_t mode;
+    uint8_t state;
     uint8_t cbc[16];
     unsigned long ctx[4 * 4 * 15 + 4];
+
+    uint8_t sharedKey[32]; //is used only in the case of P1_INIT_DECRYPT_SHOW_SHARED_KEY, the key is put aside here, until it is autherized to be shared by the dialog
+                           //should be cleaned to 0 when possible
+
+
+    uint8_t nonce[32];
+
+
+    uint16_t messageLengthBytes;
+    uint8_t dialogTitle[32];
+    uint8_t dialogContent[110]; //Should be able to hold: 65535 bytes between your ARDOR-AXL8-9PF8-UQTF-CWB92 and ARDOR-AXL8-9PF8-UQTF-CWB92 and share encryption key
+                             //Note: if you change the ARDOR prefix to something longer, then you need to lengthen this array
+
 } encyptionState_t;
 
 typedef struct {

@@ -204,11 +204,14 @@ uint8_t ardorKeys(const uint32_t * const derivationPath, const uint8_t derivatio
 
 //todo, figure out what the real size of the keyseed is
 //Creates a shared AES encryption key one the matches the key related to the derivation path, the target public key and the nonce
-//@param derivationPath - the derivation path
-//@param derivationPathLengthInUints32 - kinda clear what this is
-//@param targetPublicKey - the 32 byte public key
+//@param in: derivationPath                     - the derivation path
+//@param in: derivationPathLengthInUints32      - kinda clear what this is
+//@param in: targetPublicKey                    - the 32 byte public key
+//@param out: aesKeyOut                         - the shared encryption key 32 bytes
+//@param out: addressIdOut                      - the address id related to the derivation path on the ledger
+
 uint8_t getSharedEncryptionKey(const uint32_t * const derivationPath, const uint8_t derivationPathLengthInUints32, const uint8_t* const targetPublicKey, 
-                                const uint8_t * const nonce, uint16_t * const exceptionOut, uint8_t * const aesKeyOut) {
+                                const uint8_t * const nonce, uint16_t * const exceptionOut, uint8_t * const aesKeyOut, uint64_t * const addressIdOut) {
     
     uint8_t keySeed[64]; os_memset(keySeed, 0, sizeof(keySeed));
 
@@ -216,6 +219,8 @@ uint8_t getSharedEncryptionKey(const uint32_t * const derivationPath, const uint
 
     if (R_SUCCESS != ret)
         return ret;
+
+    *addressIdOut = publicKeyToId(keySeed);
 
     uint8_t sharedKey[32]; os_memset(sharedKey, 0, sizeof(sharedKey));
 
