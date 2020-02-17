@@ -123,17 +123,7 @@ static handler_fn_t* lookupHandler(uint8_t ins) {
 //thit is used to clean state if we change command types
 uint8_t lastCmdNumber = 0;
 
-extern unsigned long _stack;
-#define STACK_CANARY (*((volatile uint32_t*) &_stack))
 
-//todo: figure out if we're doing cannarys
-void init_canary() { //todo, make a rand cannary here
-	STACK_CANARY = 0xDEADBEEF;
-}
-
-bool check_canary() {
-	return STACK_CANARY == 0xDEADBEEF;
-}
 
 
 //Does what it says, in return buffers the first byte is the return code, 0 is sucess allways
@@ -181,6 +171,7 @@ static void ardor_main(void) {
 		// "true" main function defined at the bottom of this file.
 		BEGIN_TRY {
 			TRY {
+
 				rx = tx;
 				tx = 0; // ensure no race in CATCH_OTHER if io_exchange throws an error
 				rx = io_exchange(CHANNEL_APDU | flags, rx);
@@ -204,6 +195,9 @@ static void ardor_main(void) {
 					fillBufferWithAnswerAndEnding(R_UNKOWN_CMD, tx);
 					continue;
 				}
+
+				PRINTF("\na %d %d %d\n", lastCmdNumber, G_io_apdu_buffer[OFFSET_INS], check_canary());
+
 				handlerFn(G_io_apdu_buffer[OFFSET_P1], G_io_apdu_buffer[OFFSET_P2],
 				          G_io_apdu_buffer + OFFSET_CDATA, G_io_apdu_buffer[OFFSET_LC], &flags, &tx, G_io_apdu_buffer[OFFSET_INS] != lastCmdNumber);
 

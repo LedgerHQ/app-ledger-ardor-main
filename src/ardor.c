@@ -34,6 +34,19 @@
 //the global state
 states_t state;
 
+
+extern unsigned long _stack;
+#define STACK_CANARY (*((volatile uint32_t*) &_stack))
+
+//todo: figure out if we're doing cannarys
+void init_canary() { //todo, make a rand cannary here
+    STACK_CANARY = 0xDEADBEEF;
+}
+
+bool check_canary() {
+    return STACK_CANARY == 0xDEADBEEF;
+}
+
 //This is a prepocessor function for dialogs, it allows long labels to go in circles, like long crypto addresses, I have no idea how this works :)
 unsigned int makeTextGoAround_preprocessor(bagl_element_t * const element)
 {

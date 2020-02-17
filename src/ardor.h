@@ -85,7 +85,7 @@ typedef struct {
 
     uint16_t messageLengthBytes;
     uint8_t dialogTitle[32];
-    uint8_t dialogContent[110]; //Should be able to hold: 65535 bytes between your ARDOR-AXL8-9PF8-UQTF-CWB92 and ARDOR-AXL8-9PF8-UQTF-CWB92 and share encryption key
+    uint8_t dialogContent[120]; //Should be able to hold: 65535 bytes between your ARDOR-AXL8-9PF8-UQTF-CWB92 and ARDOR-AXL8-9PF8-UQTF-CWB92 and share encryption key
                              //Note: if you change the ARDOR prefix to something longer, then you need to lengthen this array
 
 } encyptionState_t;
@@ -117,3 +117,7 @@ void cleanSharedState();
 extern const txnType TXN_TYPES[];
 extern const uint8_t LEN_TXN_TYPES;
 unsigned int makeTextGoAround_preprocessor(bagl_element_t * const element);
+
+
+void init_canary();
+bool check_canary();

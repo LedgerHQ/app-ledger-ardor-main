@@ -42,7 +42,7 @@
     This command allows the client to encrypt and decrypt messages that are assigned to some foreign public key and nonce
     First you need to call the right INIT function, you have 3 choices. After that you call P1_AES_ENCRYPT_DECRYPT as many times as you need
 
-    //todo descibe the msg size and in other places the endian'nes of the code
+    //todo describe the msg size and in other places the endian'nes of the code
 
     API:
 
@@ -90,8 +90,12 @@ static unsigned int ui_screen_button(const unsigned int button_mask, const unsig
 
     uint tx = 0;
 
+    PRINTF("ASDASD");
+
     switch (button_mask) {
-        case BUTTON_EVT_RELEASED | BUTTON_LEFT:
+        case BUTTON_EVT_RELEASED | BUTTON_RIGHT:
+
+            PRINTF("ASDASD1");
 
             G_io_apdu_buffer[tx++] = R_SUCCESS;
 
@@ -105,18 +109,26 @@ static unsigned int ui_screen_button(const unsigned int button_mask, const unsig
                 tx += 32;
             }
 
-            os_memset(state.encryption.sharedKey, 0, sizeof(state.encryption.sharedKey)); //cleaning as soon as possible, the actuable key we are using to do the work is in ctx
-            state.encryption.mode = STATE_AUTHORIZED;
+            PRINTF("ASDASD2");
 
-        case BUTTON_EVT_RELEASED | BUTTON_RIGHT:
+            os_memset(state.encryption.sharedKey, 0, sizeof(state.encryption.sharedKey)); //cleaning as soon as possible, the actuable key we are using to do the work is in ctx
+            state.encryption.state = STATE_AUTHORIZED;
+
+            break;
+
+        case BUTTON_EVT_RELEASED | BUTTON_LEFT:
 
             cleanEncryptionState();
             G_io_apdu_buffer[tx++] = R_REJECT;
+
+            break;
 
         default:
 
             return 0;
     }
+
+    PRINTF("ASDASD3");
 
     G_io_apdu_buffer[tx++] = 0x90;
     G_io_apdu_buffer[tx++] = 0x00;
@@ -167,10 +179,15 @@ void encryptDecryptMessageHandlerHelper(const uint8_t p1, const uint8_t p2, cons
         uint32_t derivationPath[32]; //todo check if i can just point to the derivation path
         os_memcpy(derivationPath, dataBuffer + sizeof(state.encryption.messageLengthBytes), derivationLength * sizeof(uint32_t));
 
+        PRINTF("\n checkK6 %d %d\n", check_canary(), derivationPath);
+        PRINTF("\n checkK6 %d %d\n", check_canary(), derivationPath);
+
         uint8_t exceptionOut = 0;
         uint64_t localAddressId;
 
         uint8_t * noncePtr = dataBuffer + derivationLength * sizeof(uint32_t) + 32 + sizeof(state.encryption.messageLengthBytes);
+
+        PRINTF("\n checkK5 %d %d\n", check_canary(), noncePtr);
 
         if (P1_INIT_ENCRYPT == p1) {
             cx_rng(state.encryption.nonce, sizeof(state.encryption.nonce));
@@ -185,13 +202,20 @@ void encryptDecryptMessageHandlerHelper(const uint8_t p1, const uint8_t p2, cons
         uint8_t tempLength = strlen(state.encryption.dialogContent);
         reedSolomonEncode(localAddressId, state.encryption.dialogContent + tempLength);
         tempLength += 20; //todo move to const
+        
+        PRINTF("\n checkK4 %d\n", check_canary());
+
         snprintf(state.encryption.dialogContent + tempLength, sizeof(state.encryption.dialogContent) - tempLength, " and %s-", APP_PREFIX);
-        tempLength += 6 + sizeof(APP_PREFIX);
+        tempLength += 6 + strlen(APP_PREFIX);
         reedSolomonEncode(publicKeyToId(dataBuffer + derivationLength * sizeof(uint32_t) + sizeof(state.encryption.messageLengthBytes)), state.encryption.dialogContent + tempLength);
         tempLength += 20;
 
+        PRINTF("\n checkK3 %d\n", check_canary());
+
         if (P1_INIT_DECRYPT_SHOW_SHARED_KEY == p1)
             snprintf(state.encryption.dialogContent + tempLength, sizeof(state.encryption.dialogContent) - tempLength, " and share encryption key");
+
+        PRINTF("ddd %d %d", strlen(state.encryption.dialogContent), strlen(APP_PREFIX));
 
         if (R_KEY_DERIVATION_EX == ret) {
             cleanEncryptionState();
@@ -204,6 +228,8 @@ void encryptDecryptMessageHandlerHelper(const uint8_t p1, const uint8_t p2, cons
             G_io_apdu_buffer[(*tx)++] = ret;
             return;
         }
+
+        PRINTF("\n checkK2 %d\n", check_canary());
 
         if (P1_INIT_ENCRYPT == p1) {
             snprintf(state.encryption.dialogTitle, sizeof(state.encryption.dialogTitle), "Msg Encryption");
@@ -235,6 +261,8 @@ void encryptDecryptMessageHandlerHelper(const uint8_t p1, const uint8_t p2, cons
 
         state.encryption.state = STATE_BUTTON;
         state.encryption.mode = p1;
+
+        PRINTF("\n checkK1 %d\n", check_canary());
 
         UX_DISPLAY(ui_screen, (bagl_element_callback_t)makeTextGoAround_preprocessor)
         *flags |= IO_ASYNCH_REPLY;
