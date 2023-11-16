@@ -138,16 +138,13 @@ else
     DEFINES += PRINTF\(...\)=
 endif
 
-AUTOGEN_SRC := src/txnTypeLists.c
-AUTOGEN_OBJ := $(AUTOGEN_SRC:src/%.c=obj/%.o)
+AUTOGEN_SRC := $(PWD)/src/txnTypeLists.c
 
 SOURCE_FILES += $(AUTOGEN_SRC)
 
 .PHONY: realclean clean
 
 all: default
-
-$(AUTOGEN_OBJ): src/authAndSignTxn.c $(AUTOGEN_SRC)
 
 $(AUTOGEN_SRC): createTxnTypes.py txtypes.txt
 	python ./createTxnTypes.py > $@
