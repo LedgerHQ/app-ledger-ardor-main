@@ -2,11 +2,15 @@ bin/
 debug/
 dep/
 obj/
+build/
 src/glyphs\.c
 src/glyphs\.h
 usbtool/
-src/txnTypeLists.c
 .vscode/
 output-scan-build/
 tests/build/
 scan-build/
+.history/
+tests/__pycache__/
+tests/snapshots-tmp/
+.venv/

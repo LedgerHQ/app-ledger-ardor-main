@@ -17,15 +17,38 @@ Then you can switch to this repository and launch the `ledger-app-builder` docke
     $ docker run --rm -ti -v "$(realpath .):/app" ledger-app-builder:latest
     root@656be163fe84:/app# make
 
-### Unit test
+### Functional tests
 
-Unit tests are under the `tests` directory. You can build and run them with the following commands:
+Functional tests are written using the Ragger framework. The tests are located in the `tests` folder.
 
-    cd tests
-    cmake -Bbuild -H. && make -C build
-    CTEST_OUTPUT_ON_FAILURE=1 make -C build clean test
+#### Install ragger and dependencies
 
-To clean the tests build just delete the `tests/build` directory.
+    pip install --extra-index-url https://test.pypi.org/simple/ -r requirements.txt
+    sudo apt-get update && sudo apt-get install qemu-user-static
+
+#### Run tests
+
+To run all tests just issue the following command:
+
+    pytest --device all -v --tb=short tests/
+
+Please note you need all the different versions compiled. You can compile them all by running the helper script `./make-all` inside the docker build image.
+
+### End to end tests
+
+End to end tests are run from an Ardor node and the Speculos emulator. The Ardor node has some unit tests that use the Speculos emulator to test the Ledger app. Those tests also use the Speculos API to assert screen texts and send button press commands.
+
+These tests require Docker (or a local Speculos installation) and Java 8 or newer.
+
+To run the tests you need to build the app, load it into the Speculos emulator and run the tests from the Ardor node.
+
+1. Build the Ledger app.
+2. Run the app on the Speculos emulator using Docker. As an alternative you can use a locally installed Speculos emulator. In this case you will need to run the emulator on port 9999 and the API server on port 5000. The following command will run the emulator on Docker:
+
+    docker run --rm -it -v $(pwd):/speculos/apps -p 9999:9999 -p 5000:5000 ghcr.io/ledgerhq/speculos --display headless --seed "opinion change copy struggle town cigar input kit school patient execute bird bundle option canvas defense hover poverty skill donkey pottery infant sense orchard" --model nanos apps/bin/app.elf
+
+3. Clone the Ardor node repository with the Ledger unit tests: `git clone https://sargue@bitbucket.org/sargue/ardor-ledger-test.git`
+4. Run tests: `./run-unit-tests.sh com.jelurida.ardor.integration.wallet.ledger.application.LedgerSpeculosSuite`
 
 ### Enable Log Messages
 
@@ -67,15 +90,6 @@ The project uses Github Actions to run the Clang static analyzer and the unit te
 
 The CI is configured on the `.github/workflows/ci-workflow.yml` with inspiration from the [`app-boilerplate`](https://github.com/LedgerHQ/app-boilerplate) and the [`app-xrp`](https://github.com/LedgerHQ/app-xrp).
 
-### State Cleaning
-
-Since we use a union data type for command handlers state (`states_t` in `ardor.h`) to save memory, make sure to **clear this state**
-to avoid some attack vectors.
-
-This is done by passing `true` in the `isLastCommandDifferent` parameter of the handler function. In this case the handler has to clear the state before using it.
-
-In addition state must be cleared whenever we get an error in a handler function which manages state.
-
 ### More Code Design
 
 Do not include project header files inside other project header files to prevent complicating the dependencies.
@@ -92,8 +106,8 @@ Changes to the `txtypes.txt` should be picked up by the make process and a new `
 
 ### Code Flow
 
-The code flow starts at ardor_main (`main.c`) which uses a global try/catch to prevent the app from crashing on error.
-The code loops on io_exchange waiting for the next command buffer, then calling the appropriate handler function implemented in the different .c files.
+The code flow starts at `app_main` which uses a global try/catch to prevent the app from crashing on error.
+The code loops on `io_recv_command` waiting for the next command buffer, then calling the appropriate handler function implemented in the different .c files.
 
 ## APDU Protocol
 
@@ -141,7 +155,7 @@ All return values for functions should be checked in every function.
 
 ## Key Derivation Algorithm
 
-Ardor signatures are based on the EC-KCDSA over Curve25519 algorithm which is not supported natively by Ledger.
+Ardor signatures are based on a custom variant of the EC-KCDSA over Curve25519 algorithm which is not supported natively by Ledger.
 
 To support standard BIP32 key derivation we implemented curve conversion for Ardor using the protocol [Yaffe-Bender HD key derivation for EC-KCDSA](https://www.jelurida.com/sites/default/files/kcdsa.pdf), it's a derivation scheme that rides on top of the BIP32-Ed25519 HD key derivation scheme.
 
@@ -157,7 +171,7 @@ Let's refer to `CLAMP(SHA512(privateKey)[:32])` as KL
 
 The derivation composition flow for path P is:
 
-1. os_perso_derive_node_bip32 derives KLKR and chaincode for P using SLIP10 initialization on 512 bits master seed from bip39/bip32 24 words
+1. os_derive_bip32_no_throw derives KLKR and chaincode for P using SLIP10 initialization on 512 bits master seed from bip39/bip32 24 words
 2. Derive PublicKeyED25519 using cx_eddsa_get_public_key and KL, the point is encoded as 65 bytes 0x04 XBigEndian YBigEndian
 3. PubleyKeyED25519YLE = convert(YBigEndian) - just reverse the bytes
 4. PublicKeyCurve25519X = morph(PublicKeyEED25519YLE)
@@ -176,4 +190,6 @@ Extra Notes:
 
 * [This repo](https://github.com/LedgerHQ/orakolo) implements SLIP10 master seed generation and BIP32 HD EdDSA key derivation in python for reference, [this clone](https://github.com/haimbender/orakolo) also implements master public key derivation for BIP32 EdDSA
 
-* Curve25519 and ED25519 curves don't really look like curves, they are just a cloud of points
+* Signing is using the formula `s * (x - h) mod order25519`. This differs from a standard
+implementation of EC-KCDSA (`s * (x - h ⊕ r)`). In this custom variant, `h` is calculated as
+`H(m || r)` , where `r = [k]G and k = H(m || sk)`.

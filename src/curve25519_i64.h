@@ -1,6 +1,6 @@
 /*
  Modified by mko.
- 
+
  */
 /* Generic 64-bit integer implementation of Curve25519 ECDH
  * Written by Matthijs van Duin, 200608242056
@@ -9,23 +9,22 @@
  * Based on work by Daniel J Bernstein, http://cr.yp.to/ecdh.html
  */
 
+#pragma once
+
 #include <stddef.h>
 
 typedef unsigned char k25519[32]; /* any type of key */
 
 extern const k25519 zero25519;  /* 0 */
-extern const k25519 prime25519;  /* the prime 2^255-19 */
-extern const k25519 order25519;  /* group order (a prime near 2^252+2^124) */
+extern const k25519 prime25519; /* the prime 2^255-19 */
+extern const k25519 order25519; /* group order (a prime near 2^252+2^124) */
 
-
-typedef k25519 pub25519;  /* public key */
+typedef k25519 pub25519;   /* public key */
 typedef k25519 priv25519;  /* private key (for key agreement) */
-typedef k25519 spriv25519;  /* private key for signing */
-typedef k25519 sec25519;  /* shared secret */
-
+typedef k25519 spriv25519; /* private key for signing */
+typedef k25519 sec25519;   /* shared secret */
 
 /********* KEY AGREEMENT *********/
-
 
 /* internal function - do not use directly */
 void core25519(k25519 P, spriv25519 s, const priv25519 k, const k25519 G);
@@ -54,7 +53,6 @@ void keygen25519(pub25519 P, spriv25519 s, priv25519 k);
 void curve25519(sec25519 Z, const priv25519 k, const pub25519 P);
 
 /********* DIGITAL SIGNATURES *********/
-
 
 /* deterministic EC-KCDSA
  *
@@ -91,7 +89,6 @@ void curve25519(sec25519 Z, const priv25519 k, const pub25519 P);
  * parallel to) hashing the message.
  */
 
-
 /* Signature generation primitive, calculates (x-h)s mod q
  *   v  [out] signature value
  *   h  [in]  signature hash (of message, signature pub key, and context data)
@@ -100,7 +97,6 @@ void curve25519(sec25519 Z, const priv25519 k, const pub25519 P);
  * returns true on success, false on failure (use different x or h)
  */
 int sign25519(k25519 v, const k25519 h, const priv25519 x, const spriv25519 s);
-
 
 /* Signature verification primitive, calculates Y = vP + hG
  *   Y  [out] signature public key

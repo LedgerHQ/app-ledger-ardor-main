@@ -1,0 +1,80 @@
+name: Build and run functional tests using ragger
+
+# This workflow will build the app and then run functional tests using the Ragger framework upon Speculos emulation.
+# It calls a reusable workflow developed by Ledger's internal developer team to build the application and upload the
+# resulting binaries.
+# It then calls another reusable workflow to run the Ragger tests on the compiled application binary.
+#
+# While this workflow is optional, having functional testing on your application is mandatory and this workflow and
+# tooling environment is meant to be easy to use and adapt after forking your application
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+      - develop
+  pull_request:
+
+jobs:
+  build_application:
+    name: Build application
+    uses: LedgerHQ/ledger-app-workflows/.github/workflows/reusable_build.yml@v1
+    with:
+      upload_app_binaries_artifact: "compiled_app_binaries"
+
+  ragger_tests:
+    name: Run ragger tests
+    needs: build_application
+    uses: LedgerHQ/ledger-app-workflows/.github/workflows/reusable_ragger_tests.yml@v1
+    with:
+      download_app_binaries_artifact: "compiled_app_binaries"
+
+  job_e2e_tests:
+    name: E2E tests
+    needs: build_application
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    container:
+      image: ghcr.io/ledgerhq/speculos:latest
+      options: --entrypoint /bin/bash
+    
+    steps:
+      - name: Install dependencies
+        run: apt update && apt install -qy openjdk-17-jdk-headless git
+
+      - name: Download app binary
+        uses: actions/download-artifact@v3
+        with:
+          name: "compiled_app_binaries"
+          path: /tmp/app/build/
+
+      - name: Run speculos in the background
+        run: |
+          /speculos/speculos.py --display headless --seed "opinion change copy struggle town cigar input kit school patient execute bird bundle option canvas defense hover poverty skill donkey pottery infant sense orchard" /tmp/app/build/nanos/bin/app.elf 2>/tmp/speculos.log &
+          echo $! >/tmp/speculos.pid
+
+      - name: Run tests with Ardor node
+        run: |
+          git clone --branch ledger-tests https://sargue@bitbucket.org/sargue/ardor-ledger-test.git /ardor
+          cd /ardor
+          ./run-unit-tests.sh com.jelurida.ardor.integration.wallet.ledger.application.LedgerSpeculosSuite
+
+      - name: Kill speculos
+        run: kill -9 $(cat /tmp/speculos.pid)
+
+      - name: Upload Speculos log
+        uses: actions/upload-artifact@v3
+        if: failure()
+        with:
+          name: speculos-log
+          path: /tmp/speculos.log
+
+      - name: Upload Ardor log
+        uses: actions/upload-artifact@v3
+        if: failure()
+        with:
+          name: ardor-log
+          path: /ardor/logs/ardor.0.log

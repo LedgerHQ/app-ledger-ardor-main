@@ -1,45 +1,47 @@
 /*******************************************************************************
-*  (c) 2019 Haim Bender
-*
-*
-*  Licensed under the Apache License, Version 2.0 (the "License");
-*  you may not use this file except in compliance with the License.
-*  You may obtain a copy of the License at
-*
-*      http://www.apache.org/licenses/LICENSE-2.0
-*
-*  Unless required by applicable law or agreed to in writing, software
-*  distributed under the License is distributed on an "AS IS" BASIS,
-*  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-*  See the License for the specific language governing permissions and
-*  limitations under the License.
-********************************************************************************/
-
+ *  (c) 2019 Haim Bender
+ *  (c) 2021-2023 Jelurida IP B.V.
+ *
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ ********************************************************************************/
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include <os.h>
-#include <os_io_seproxyhal.h>
-#include "ux.h"
-
-#include "aes/aes.h"
+#include "io.h"      // io_send*
+#include "parser.h"  // command_t
 
 #include "returnValues.h"
 #include "config.h"
 #include "ardor.h"
+#include "io_helper.h"
 
+#define P1_INIT_ENCRYPT 1
+#define P1_INIT_DECRYPT_HIDE_SHARED_KEY 2
+#define P1_INIT_DECRYPT_SHOW_SHARED_KEY 3
+#define P1_AES_ENCRYPT_DECRYPT 4
 
-#define P1_INIT_ENCRYPT                     1
-#define P1_INIT_DECRYPT_HIDE_SHARED_KEY     2
-#define P1_INIT_DECRYPT_SHOW_SHARED_KEY     3
-#define P1_AES_ENCRYPT_DECRYPT              4
-
+#define NONCE_LENGTH 32
+#define IV_LENGTH 16
 
 /*
 
-    This command allows the client to encrypt and decrypt messages that are assigned to some foreign public key and nonce
-    First you need to call the right INIT function, you have 3 choices. After that you call P1_AES_ENCRYPT_DECRYPT as many times as you need
+   This command allows the client to encrypt and decrypt messages that are assigned to some foreign
+   public key. First you need to call the right INIT function, you have 3 choices. After
+   that you call P1_AES_ENCRYPT_DECRYPT as many times as you need
 
     API:
 
@@ -48,186 +50,175 @@
         returns:    1 byte status | nonce (on success) | IV
 
         P1: P1_INIT_DECRYPT_HIDE_SHARED_KEY:
-        dataBuffer: derivaiton path (uint32) * some length | second party public key | nonce | IV
+        dataBuffer: derivation path (uint32) * some length | second party public key | nonce | IV
         returns:    1 byte status
 
         P1: P1_INIT_DECRYPT_SHOW_SHARED_KEY:
-        dataBuffer: derivaiton path (uint32) * some length | second party public key | nonce | IV
+        dataBuffer: derivation path (uint32) * some length | second party public key | nonce | IV
         returns:    1 byte status | sharedkey 32 bytes
 
         P1_AES_ENCRYPT_DECRYPT:
-        dataBuffer: buffer (224 max size) should be in modulu of 16 
+        dataBuffer: buffer (224 max size) should be in modulo 16
         returns:    1 bytes status | encrypted / decrypted buffer (same size as input)
 */
 
-void cleanEncryptionState() {
-    state.encryption.mode = 0;
+static int cleanAndReturn(uint8_t ret) {
+    cleanState();
+    return io_send_return1(ret);
 }
 
+static bool getDerivationLength(const uint8_t p1,
+                                const uint8_t dataLength,
+                                uint8_t* derivationLength) {
+    int16_t derivationLengthSigned = 0;
 
-//declerations of all AES functions, not including the h file to avoid mess of types
-bool aes_decrypt_init_fixed(const aes_uchar *key, size_t len, aes_uint * rk);
-void aes_decrypt(void *ctx, const aes_uchar *crypt, aes_uchar *plain);
-bool aes_encrypt_init_fixed(const aes_uchar *key, size_t len, aes_uint *rk);
-void aes_encrypt(void *ctx, const aes_uchar *plain, aes_uchar *crypt);
-
-
-//Since this is a callback function, and the handler manages state, it's this function's reposibility to clean the state
-//Every time we get some sort of an error
-void encryptDecryptMessageHandlerHelper(const uint8_t p1, const uint8_t p2, const uint8_t * const dataBuffer, const uint8_t dataLength,
-        uint8_t * const flags, uint8_t * const tx, const bool isLastCommandDifferent) {
-
-    UNUSED(p2);
-    UNUSED(flags);
-
-    if (isLastCommandDifferent)
-        cleanEncryptionState();
-
-    if ((P1_INIT_ENCRYPT == p1) || (P1_INIT_DECRYPT_HIDE_SHARED_KEY == p1) || (P1_INIT_DECRYPT_SHOW_SHARED_KEY == p1)) {
-
-        if (0 != dataLength % sizeof(uint32_t)) {
-            cleanEncryptionState();
-            G_io_apdu_buffer[(*tx)++] = R_WRONG_SIZE_ERR;
-            return;
-        }
-
-        int16_t derivationLengthSigned = 0;
-
-        if (P1_INIT_ENCRYPT == p1)
-            derivationLengthSigned = (dataLength - 32) / sizeof(uint32_t); //no underflow because type is signed
-        else
-            derivationLengthSigned = (dataLength - 32 * 2 - 16) / sizeof(uint32_t);
-
-        if ((MIN_DERIVATION_LENGTH > derivationLengthSigned) || (MAX_DERIVATION_LENGTH < derivationLengthSigned)) {
-            cleanEncryptionState();
-            G_io_apdu_buffer[(*tx)++] = R_WRONG_SIZE_ERR;
-            return;
-        }
-
-        uint8_t derivationLength = derivationLengthSigned; //cast is ok, because if the check above
-
-        uint8_t nonce[32];
-        const uint8_t * noncePtr = dataBuffer + derivationLength * sizeof(uint32_t) + 32;
-
-        if (P1_INIT_ENCRYPT == p1) {
-            cx_rng(nonce, sizeof(nonce));
-            noncePtr = nonce; //if we are decrypting then we are using from the command
-        }
-
-        uint16_t exceptionOut = 0;
-        uint8_t encryptionKey[32];
-
-        uint8_t ret = getSharedEncryptionKey(dataBuffer, derivationLength, dataBuffer + derivationLength * sizeof(uint32_t), noncePtr, &exceptionOut, encryptionKey);
-
-        if (R_KEY_DERIVATION_EX == ret) {
-            cleanEncryptionState();
-            G_io_apdu_buffer[0] = ret;  
-            G_io_apdu_buffer[1] = exceptionOut >> 8;
-            G_io_apdu_buffer[2] = exceptionOut & 0xFF;
-            *tx = 3;
-            return;
-        } else if (R_SUCCESS != ret) {
-            cleanEncryptionState();
-            G_io_apdu_buffer[0] = ret;
-            *tx = 1;
-            return;
-        }
-
-        if (P1_INIT_ENCRYPT == p1) {
-            if (!aes_encrypt_init_fixed(encryptionKey, 32, state.encryption.ctx)) {
-                cleanEncryptionState();
-                G_io_apdu_buffer[0] = R_AES_ERROR;
-                *tx = 1;
-                return;
-            }
-        } else {
-            if (!aes_decrypt_init_fixed(encryptionKey, 32, state.encryption.ctx)) {
-                cleanEncryptionState();
-                G_io_apdu_buffer[0] = R_AES_ERROR;
-                *tx = 1;
-                return;
-            }
-
-            memcpy(state.encryption.cbc, dataBuffer + dataLength - sizeof(state.encryption.cbc), sizeof(state.encryption.cbc)); //Copying the IV into the CBC
-        }
-        
-        state.encryption.mode = p1;
-        G_io_apdu_buffer[(*tx)++] = R_SUCCESS;
-
-        if (P1_INIT_ENCRYPT == p1) {
-            memcpy(G_io_apdu_buffer + *tx, nonce, sizeof(nonce));
-            *tx+= 32;
-            cx_rng(state.encryption.cbc, sizeof(state.encryption.cbc)); //The IV is stored in the CVC
-            memcpy(G_io_apdu_buffer + *tx, state.encryption.cbc, sizeof(state.encryption.cbc));
-            *tx+= sizeof(state.encryption.cbc);
-        } else if (P1_INIT_DECRYPT_SHOW_SHARED_KEY == p1) {
-            memcpy(G_io_apdu_buffer + *tx, encryptionKey, sizeof(encryptionKey));
-            *tx+= 32;
-        }
-
-    } else if (P1_AES_ENCRYPT_DECRYPT == p1) {
-
-        if (isLastCommandDifferent) {
-            cleanEncryptionState();
-            G_io_apdu_buffer[(*tx)++] = R_NO_SETUP;
-            return;
-        }
-
-        if ((P1_INIT_ENCRYPT != state.encryption.mode) && (P1_INIT_DECRYPT_HIDE_SHARED_KEY != state.encryption.mode) && 
-            (P1_INIT_DECRYPT_SHOW_SHARED_KEY != state.encryption.mode))
-        {
-            cleanEncryptionState();
-            G_io_apdu_buffer[(*tx)++] = R_NO_SETUP;
-            return;
-        }
-
-        if (0 != dataLength % 16) {
-            cleanEncryptionState();
-            G_io_apdu_buffer[(*tx)++] = R_WRONG_SIZE_MODULO_ERR;
-            return;
-        }
-
-        uint8_t * pos = G_io_apdu_buffer + OFFSET_CDATA;
-        uint8_t tmp[AES_BLOCK_SIZE];
-
-        while (pos < dataBuffer + dataLength) {
-            if (P1_INIT_ENCRYPT == state.encryption.mode) { //if we are doing encryption:
-
-                for (uint8_t j = 0; j < AES_BLOCK_SIZE; j++)
-                    state.encryption.cbc[j] ^= pos[j];
-
-                aes_encrypt(state.encryption.ctx, state.encryption.cbc, state.encryption.cbc);
-                memcpy(pos, state.encryption.cbc, AES_BLOCK_SIZE);
-            } else {
-                memcpy(tmp, pos, AES_BLOCK_SIZE);
-                aes_decrypt(state.encryption.ctx, pos, pos);
-                for (uint8_t j = 0; j < AES_BLOCK_SIZE; j++)
-                    pos[j] ^= state.encryption.cbc[j];
-
-                memcpy(state.encryption.cbc, tmp, AES_BLOCK_SIZE);
-            }
-
-            pos += AES_BLOCK_SIZE;
-        }
-
-        *tx = 1 + dataLength;
-
-        for (uint8_t i = 0; i < dataLength; i++)
-                G_io_apdu_buffer[i+1] = G_io_apdu_buffer[OFFSET_CDATA + i];
-
-        G_io_apdu_buffer[0] = R_SUCCESS;
-
+    if (p1 == P1_INIT_ENCRYPT) {
+        // no underflow because the type is signed
+        derivationLengthSigned = (dataLength - PUBLIC_KEY_SIZE) / sizeof(uint32_t);
     } else {
-        cleanEncryptionState();
-        G_io_apdu_buffer[(*tx)++] = R_UNKOWN_CMD;
+        derivationLengthSigned =
+            (dataLength - PUBLIC_KEY_SIZE - NONCE_LENGTH - IV_LENGTH) / sizeof(uint32_t);
     }
+
+    if ((derivationLengthSigned < MIN_DERIVATION_LENGTH) ||
+        (derivationLengthSigned > MAX_DERIVATION_LENGTH)) {
+        return false;
+    }
+
+    *derivationLength = (uint8_t) derivationLengthSigned;  // cast is ok, because of the check above
+    return true;
 }
 
-void encryptDecryptMessageHandler(const uint8_t p1, const uint8_t p2, const uint8_t * const dataBuffer, const uint8_t dataLength,
-        uint8_t * const flags, uint8_t * const tx, const bool isLastCommandDifferent) {
+static int initHandler(const command_t* const cmd) {
+    if (cmd->lc % sizeof(uint32_t) != 0) {
+        return cleanAndReturn(R_WRONG_SIZE_ERR);
+    }
 
-    encryptDecryptMessageHandlerHelper(p1, p2, dataBuffer, dataLength, flags, tx, isLastCommandDifferent);
-    
-    G_io_apdu_buffer[(*tx)++] = 0x90;
-    G_io_apdu_buffer[(*tx)++] = 0x00;
+    if (cmd->lc > MAX_CHUNK_SIZE_ENCRYPT) {
+        return cleanAndReturn(R_NO_SPACE_BUFFER_TOO_SMALL);
+    }
+
+    uint8_t derivationLength = 0;
+    if (!getDerivationLength(cmd->p1, cmd->lc, &derivationLength)) {
+        return cleanAndReturn(R_WRONG_SIZE_ERR);
+    }
+
+    uint8_t nonce[NONCE_LENGTH];
+    const uint8_t* noncePtr = cmd->data + derivationLength * sizeof(uint32_t) + PUBLIC_KEY_SIZE;
+
+    if (cmd->p1 == P1_INIT_ENCRYPT) {
+        cx_trng_get_random_data(nonce, sizeof(nonce));
+        noncePtr = nonce;  // if we are decrypting then we are using from the command
+    }
+
+    uint16_t exceptionOut = 0;
+    uint8_t encryptionKey[32];
+
+    uint8_t ret = getSharedEncryptionKey(cmd->data,
+                                         derivationLength,
+                                         cmd->data + derivationLength * sizeof(uint32_t),
+                                         noncePtr,
+                                         &exceptionOut,
+                                         encryptionKey);
+
+    if (ret == R_KEY_DERIVATION_EX) {
+        cleanState();
+        explicit_bzero(encryptionKey, sizeof(encryptionKey));  // cleaning the key from memory
+        return io_send_return3(ret, exceptionOut >> 8, exceptionOut & 0xFF);
+    } else if (ret != R_SUCCESS) {
+        explicit_bzero(encryptionKey, sizeof(encryptionKey));  // cleaning the key from memory
+        return cleanAndReturn(ret);
+    }
+
+    if (cx_aes_init_key_no_throw(encryptionKey, sizeof(encryptionKey), &state.encryption.aesKey) !=
+        CX_OK) {
+        return cleanAndReturn(R_AES_ERROR);
+    }
+    if (cmd->p1 != P1_INIT_ENCRYPT) {
+        // Copying the IV into the CBC
+        memcpy(state.encryption.cbc,
+               cmd->data + cmd->lc - sizeof(state.encryption.cbc),
+               sizeof(state.encryption.cbc));
+    }
+
+    state.encryption.mode = cmd->p1;
+    state.encryption.buffer[0] = R_SUCCESS;
+    size_t bufferSize = 1;
+
+    if (cmd->p1 == P1_INIT_ENCRYPT) {
+        memcpy(state.encryption.buffer + bufferSize, nonce, sizeof(nonce));
+        bufferSize += sizeof(nonce);
+        // The IV is stored in the CBC
+        cx_trng_get_random_data(state.encryption.cbc, sizeof(state.encryption.cbc));
+        memcpy(state.encryption.buffer + bufferSize,
+               state.encryption.cbc,
+               sizeof(state.encryption.cbc));
+        bufferSize += sizeof(state.encryption.cbc);
+    } else if (cmd->p1 == P1_INIT_DECRYPT_SHOW_SHARED_KEY) {
+        memcpy(state.encryption.buffer + bufferSize, encryptionKey, sizeof(encryptionKey));
+        bufferSize += sizeof(encryptionKey);
+    }
+
+    explicit_bzero(encryptionKey, sizeof(encryptionKey));  // cleaning the key from memory
+    return io_send_response_pointer(state.encryption.buffer, bufferSize, SW_OK);
+}
+
+static int aesEncryptDecryptHandler(const command_t* const cmd) {
+    if ((state.encryption.mode != P1_INIT_ENCRYPT) &&
+        (state.encryption.mode != P1_INIT_DECRYPT_HIDE_SHARED_KEY) &&
+        (state.encryption.mode != P1_INIT_DECRYPT_SHOW_SHARED_KEY)) {
+        return cleanAndReturn(R_NO_SETUP);
+    }
+
+    if (cmd->lc % CX_AES_BLOCK_SIZE != 0) {
+        return cleanAndReturn(R_WRONG_SIZE_MODULO_ERR);
+    }
+
+    if (cmd->data == 0) {
+        return cleanAndReturn(R_NOT_ALL_BYTES_READ);
+    }
+
+    uint8_t* inPtr = cmd->data;
+    uint8_t* outPtr = state.encryption.buffer + 1;
+    state.encryption.buffer[0] = R_SUCCESS;
+
+    uint8_t* cbc = state.encryption.cbc;  // Temporary variable
+    while (inPtr < cmd->data + cmd->lc) {
+        if (state.encryption.mode == P1_INIT_ENCRYPT) {  // if we are doing encryption
+            for (uint8_t j = 0; j < CX_AES_BLOCK_SIZE; j++) {
+                cbc[j] ^= inPtr[j];
+            }
+
+            if (cx_aes_enc_block(&state.encryption.aesKey, cbc, cbc) != CX_OK) {
+                return cleanAndReturn(R_CXLIB_ERROR);
+            }
+            memcpy(outPtr, cbc, CX_AES_BLOCK_SIZE);
+        } else {
+            if (cx_aes_dec_block(&state.encryption.aesKey, inPtr, outPtr) != CX_OK) {
+                return cleanAndReturn(R_CXLIB_ERROR);
+            }
+
+            for (uint8_t j = 0; j < CX_AES_BLOCK_SIZE; j++) {
+                outPtr[j] ^= cbc[j];
+            }
+
+            memcpy(cbc, inPtr, CX_AES_BLOCK_SIZE);
+        }
+        inPtr += CX_AES_BLOCK_SIZE;
+        outPtr += CX_AES_BLOCK_SIZE;
+    }
+    return io_send_response_pointer(state.encryption.buffer, cmd->lc + 1, SW_OK);
+}
+
+// Since this is a callback function, and the handler manages state, it's this function's
+// reposibility to clean the state Every time we get some sort of an error
+int encryptDecryptMessageHandler(const command_t* const cmd) {
+    if ((cmd->p1 == P1_INIT_ENCRYPT) || (cmd->p1 == P1_INIT_DECRYPT_HIDE_SHARED_KEY) ||
+        (cmd->p1 == P1_INIT_DECRYPT_SHOW_SHARED_KEY)) {
+        return initHandler(cmd);
+    } else if (cmd->p1 == P1_AES_ENCRYPT_DECRYPT) {
+        return aesEncryptDecryptHandler(cmd);
+    } else {
+        return cleanAndReturn(R_UNKOWN_CMD);
+    }
 }
