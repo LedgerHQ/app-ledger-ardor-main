@@ -6,7 +6,6 @@
 #include "os.h"
 #include "ardor.h"
 #include "settings.h"
-#include "glyph_symbols.h"
 
 void app_quit(void) {
     // exit app here
