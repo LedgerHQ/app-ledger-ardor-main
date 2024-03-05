@@ -4,7 +4,6 @@
 #include "nbgl_use_case.h"
 #include "glyphs.h"
 #include "menu.h"
-#include "glyph_symbols.h"
 #include "blind_sign_nbgl.h"
 
 static void signTokenConfirmation() {

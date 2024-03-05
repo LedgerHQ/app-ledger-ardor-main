@@ -1,10 +1,10 @@
 #ifdef HAVE_NBGL
 
 #include "ardor.h"
-#include "glyph_symbols.h"
 #include "settings.h"
 
 #include "nbgl_use_case.h"
+#include "glyphs.h"
 
 struct use_case_review_ctx_s {
     const nbgl_icon_details_t *icon;
